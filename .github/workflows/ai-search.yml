@@ -1,0 +1,49 @@
+name: Issue to AI Search
+permissions:
+  issues: write
+on:
+  issues:
+    types:
+      - opened
+jobs:
+  respond-to-issue:
+    if: ${{ github.actor != 'dependabot[bot]' && github.actor != 'renovate[bot]' && github.actor != 'githubactions[bot]' && github.actor != 'octokitbot' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine issue
+        id: extract
+        run: |
+          context_link=$(curl -X GET https://serpapi.com/search \
+                     -d api_key="${{ secrets.SERPAPI_KEY }}" \
+                     -d engine="google" \
+                     -d q="${{ github.event.issue.title }} ${{ github.event.issue.body }}" \
+                     -d google_domain="google.com" \
+                     -d gl="us" \
+                     -d hl="en" \
+                     | jq -r '.organic_results[0].link')
+
+          echo $context_link
+
+          text=$(curl -X GET \
+                     -H "accept: application/json" \
+                     "https://url2api.applinzi.com/article?token=${{ secrets.URL2IO_TOKEN }}&url=${context_link}&fields=text" \
+                     | jq '.text' | jq -Rs . | sed 's/\\n//g' | sed 's/\\r//g' | sed 's/\\n//g' | sed 's/://g' | tr '\' ' ' | tr '"' ' ')
+
+          echo $text
+
+          prompt_text="根据提供的背景信息，请回答问题: ${{ github.event.issue.title }} ${{ github.event.issue.body }} 以下是背景信息: ${text}"
+          body=$(curl -H 'Content-Type: application/json' \
+                      -X POST "https://palm-proxy2-kappa.vercel.app/v1beta/models/gemini-pro:generateContent?key=${{ secrets.GEMINI_TOKEN }}" \
+                      -d '{"contents":[{"parts":[{"text":"'"$prompt_text"'"}]}]}' 2> /dev/null)
+          echo $body
+          issue_response=$(echo $body | jq -r '.candidates[0].content.parts[0].text')
+          echo "BODY<<EOF" >> $GITHUB_ENV
+          echo "$issue_response" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          echo "NUMBER=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+      - name: Respond to issue
+        uses: peter-evans/create-or-update-comment@v3
+        with:
+          issue-number: ${{ steps.extract.outputs.NUMBER }}
+          body: >
+            ${{ env.BODY }}
